@@ -62,16 +62,16 @@ class Redis(object):
         status = 'OK'
         if warning:
             if warning[0] == '<':
-                if value < int(warning.replace('<', '')):
+                if value < float(warning.replace('<', '')):
                     status = 'WARNING'
-            elif value > int(warning.replace('>', '')):
+            elif value > float(warning.replace('>', '')):
                 status = 'WARNING'
 
         if critical:
             if critical[0] == '<':
-                if value < int(critical.replace('<', '')):
+                if value < float(critical.replace('<', '')):
                     status = 'CRITICAL'
-            elif value > int(critical.replace('>', '')):
+            elif value > float(critical.replace('>', '')):
                 status = 'CRITICAL'
 
         return status
@@ -103,9 +103,9 @@ class Redis(object):
 
     def _hit_ratio(self):
         return (
-            int(self.info['keyspace_hits']) / (
-                int(self.info['keyspace_hits']) + 
-                int(self.info['keyspace_misses'])  * 1.0
+            float(self.info['keyspace_hits']) / (
+                float(self.info['keyspace_hits']) + 
+                float(self.info['keyspace_misses'])  * 1.0
             )
         )
 

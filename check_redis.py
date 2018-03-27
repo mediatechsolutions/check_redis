@@ -102,15 +102,20 @@ class Redis(object):
         sys.exit(nagios_output_state[output_state])
 
     def _hit_ratio(self):
-        return (
-            float(self.info['keyspace_hits']) / (
-                float(self.info['keyspace_hits']) + 
-                float(self.info['keyspace_misses'])  * 1.0
+        try:
+            return (
+                float(self.info['keyspace_hits']) / (
+                    float(self.info['keyspace_hits']) + 
+                    float(self.info['keyspace_misses'])  * 1.0
+                )
             )
-        )
+        except ZeroDivisionError:
+            return None
 
     def _total_keys(self):
-        return self.info['db0']['keys']
+        if 'db0' in self.info:
+            return self.info['db0']['keys']
+        return None
 
     def perform_check(self):
         data = dict()

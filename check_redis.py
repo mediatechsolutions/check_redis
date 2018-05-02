@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import argparse
 import sys
-import itertools
 
 import redis
 
@@ -13,150 +12,148 @@ nagios_output_state = {
     'UNKNOWN': 3,
 }
 
-class Check(object):
-    def __init__(self, key, warning_limit, error_limit, ascending=True):
-        self.key = key
-        self.value = None
-        self.warning_limit = float(warning_limit) if warning_limit else None
-        self.error_limit = float(error_limit) if error_limit else None
-        self.ascending = ascending
-
-    def __str__(self):
-        return "CHECK %s, %s, %s, %s" % (self.value, self.minimum, self.maximum, self.ascending)
-
-    def __repr__(self):
-        return str(self)
-
-    def _evaluate(self, value, limit):
-        if value is None or limit is None:
-            return False
-        result = float(value) - limit
-
-        return result > 0 if self.ascending else result < 0
-
-    def is_warning(self):
-        return self._evaluate(self.value, self.warning_limit)
-        
-    def is_error(self):
-        return self._evaluate(self.value, self.error_limit)
-
-
-class NagiosReporter(object):
-    OK = 0
-    WARN = 1
-    ERROR = 2
-    UNKNOWN = 3
-    STATUS = {
-        OK: 'OK',
-        WARN: 'WARNING',
-        ERROR: 'CRITICAL',
-        UNKNOWN: 'UNKNOWN',
-    }
-
-    def __init__(self):
-        self.result = -1
-
-    def process(self, check_list):
-        status =  -1
-        feedback = ''
-        performance = []
-        for check in check_list:
-            op = '>' if check.ascending else '<'
-            if status < self.ERROR and check.is_error():
-                status = self.ERROR
-                feedback += "ERROR for %s: %s %s %s\n" % (check.key, check.value, op, check.error_limit)
-            elif status < self.WARN and check.is_warning():
-                status = self.WARN
-                feedback += "WARNING for %s: %s %s %s\n" % (check.key, check.value, op, check.warning_limit)
-            elif check.value is None:
-                feedback += "UNKNOWN: %s could not be processed" % check.key
-            else:
-                status = self.OK
-
-            performance.append(
-                "{label}={value};{warn};{crit};;".format(
-                    label=check.key,
-                    value='U' if check.value is None else check.value,
-                    warn='' if check.warning_limit is None else check.warning_limit,
-                    crit='' if check.error_limit is None else check.error_limit,
-                )
-            )
-
-        print("{feedback}\n|{perf}".format(feedback=feedback, perf='\n'.join(performance)))
-            
-        return status % len(self.STATUS)
-
 
 class Redis(object):
-    def __init__(self, host, port, password):
-        self.info = self._get_info(host, port, password)
 
-    def _get_info(self, host, port, password):
+    def __init__(self, args):
+        self.host = args.host or 'localhost'
+        self.port = args.port or 6379
+        self.info = self._get_info(args)
+
+        self.enable_performance_data = args.enable_performance_data
+
+        self.command_list = args.command
+        self.critical_list = args.critical
+        if self.critical_list:
+            self.critical_list = self.critical_list.split(',')
+        self.warning_list = args.warning
+        if self.warning_list:
+            self.warning_list = self.warning_list.split(',')
+
+
+    def _get_info(self, args):
         try:
             return redis.Redis(
-                host=host,
-                port=port,
-                password=password,
+                host=self.host,
+                port=self.port,
+                password=args.password
             ).info()
+
         except Exception as err:
-            print("Can't connect to %s:%s" % (host, port))
+            print("Can't connect to %s:%s" % (self.host, self.port))
             print(err)
-            sys.exit(NagiosReporter.UNKNOWN)
+            sys.exit(nagios_output_state['UNKNOWN'])
+
+    def _set_performance_data(self, command, value, warning, critical):
+        # label=value;warn;crit;min;max
+        if warning:
+            warning = warning.replace('<', '').replace('>', '')
+        if critical:
+            critical = critical.replace('<', '').replace('>', '')
+
+        return '%s=%s;%s;%s;;' % (
+            command,
+            value,
+            warning or '',
+            critical or ''
+        )
+
+    def _check_limits(self, value, warning, critical):
+        status = 'OK'
+        if warning:
+            if warning[0] == '<':
+                if value < float(warning.replace('<', '')):
+                    status = 'WARNING'
+            elif value > float(warning.replace('>', '')):
+                status = 'WARNING'
+
+        if critical:
+            if critical[0] == '<':
+                if value < float(critical.replace('<', '')):
+                    status = 'CRITICAL'
+            elif value > float(critical.replace('>', '')):
+                status = 'CRITICAL'
+
+        return status
+
+
+    def _exit_with_nagios_format(self, data):
+        output_state = 'OK'
+        output = ''
+        output_perf_data = ''
+
+        for i in range(len(self.command_list)):
+            command = self.command_list[i]
+            command_data = data[command]
+            if (
+                nagios_output_state[command_data['check_state']] > 
+                nagios_output_state[output_state]
+            ):
+                output_state = command_data['check_state']
+
+            output += '%s: %s, ' % (command, command_data['value'])
+            output_perf_data += command_data['perf_data'] + ' '
+        
+        output = output_state + '\n' +output
+        if self.enable_performance_data:
+            output += '|' + output_perf_data
+
+        print(output)
+        sys.exit(nagios_output_state[output_state])
 
     def _hit_ratio(self):
         try:
             return (
                 float(self.info['keyspace_hits']) / (
                     float(self.info['keyspace_hits']) + 
-                    float(self.info['keyspace_misses'])
+                    float(self.info['keyspace_misses'])  * 1.0
                 )
             )
         except ZeroDivisionError:
             return None
 
-    def _total_keys(self, db=None):
-        if db is None:
-            result = 0
-            for k in self.info.keys():
-                if not k.startswith('db'):
-                    continue
-                v = self.info[k]
-                if not isinstance(v, dict):
-                    continue
-                result += int(v.get('keys', 0))
-                return result
-        if db in self.info:
-            return int(self.info[db]['keys'])
+    def _total_keys(self):
+        if 'db0' in self.info:
+            return self.info['db0']['keys']
         return None
 
-    def get_value(self, check_name):
-        if check_name in self.info:
-            return self.info[check_name]
-        if 'hit_ratio' == check_name:
-            return self._hit_ratio()
-        if check_name.startswith('total_keys_'):
-            return self._total_keys(check_name[len('total_keys_'):])
-        if check_name == 'total_keys':
-            return self._total_keys()
-        return None
+    def perform_check(self):
+        data = dict()
+        for i in range(len(self.command_list)):
+            command = self.command_list[i]
+            data[command] = dict()
+            data[command]['value'] = 'UNKNOWN'
+            data[command]['perf_data'] = ''
+            data[command]['check_state'] = 'OK'
 
-    def check(self, check_list):
-        self.check_list = check_list
-        for check in check_list:
-            value = self.get_value(check.key)
             try:
-                check.value = int(value)
-            except TypeError:
-                try:
-                    check.value = float(value)
-                except TypeError:
-                    check.value = value 
+                warning = self.warning_list[i]
+            except:
+                warning = None
+            try:
+                critical = self.critical_list[i]
+            except:
+                critical = None
+            if command in ['hit_ratio', 'total_keys', 'latency']:
+                data[command]['value'] = eval('self._%s' % command)()
+            else:
+                data[command]['value'] = self.info[command]
+            data[command]['perf_data'] = self._set_performance_data(
+                command,
+                data[command]['value'],
+                warning,
+                critical
+            )
+            data[command]['check_state'] = self._check_limits(
+                data[command]['value'],
+                warning,
+                critical
+            )
 
-    def list_checks(self):
-        keys = self.info.keys()
-        keys.append("hit_ratio")
-        for x in sorted(self.info.keys()):
-            print(x)
+
+
+        self._exit_with_nagios_format(data)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -169,69 +166,55 @@ def main():
         required=True
     )
 
-    parser.add_argument('--port', type=int, default=6379)
+    parser.add_argument('--port', type=int)
+
+    parser.add_argument('--username', type=str)
 
     parser.add_argument('--password', type=str)
 
-    parser.add_argument('action', choices="check list".split(), default='check', nargs='?')
-
+    # Added more commands from https://blog.serverdensity.com/monitor-redis/
+    all_command_choices = [
+        'uptime_in_seconds', 'connected_clients', 'connected_slaves',
+        'used_memory', 'mem_fragmentation_ratio', 'instantaneous_ops_per_sec',
+        'rejected_connections', 'keyspace_hits', 'keyspace_misses',
+        'used_memory_peak', 'rdb_last_save_time', 'rdb_changes_since_last_save',
+        'evicted_keys', 'blocked_clients',
+        'rejected_connections', 'hit_ratio', 'total_keys'
+    ]
     parser.add_argument(
-        '-k', '--check',
-        nargs='+',
-        default=[],
-        help='list of checks to perform.',
+        '--command',
+        help='operation mode. Limits check will not be performed if there are multiple commands (separated by commas) or if "all" is selected. Possible values: %s or "all"' % all_command_choices,
+        type=str,
+        required=True
     )
 
     parser.add_argument(
         '--enable-performance-data',
-        help='Deprecated. It is always shown',
+        help='enable output performance data',
         action='store_true',
         default=False
     )
-
-    parser.add_argument(
-        '--command',
-        help='Deprecated. Use --check instead',
-        type=str,
-    )
     parser.add_argument(
         '-w', '--warning',
-        help='Deprecated. Use --check instead',
+        help='number of entries neededed to throw a warning. If command is "all" or is a list of commands (separated by commas), warning need to be a list and limites will be checked on same order that command list. You can specify operation to check warning (default is >). Example --warning ">42,<42"',
         type=str,
         default=None
     )
     parser.add_argument(
         '-c', '--critical',
-        help='Deprecated. Use --check instead',
+        help='number of entries neededed to throw a critical If command is "all" or is a list of commands, critical need to be a list and limites will be checked on same order that command list. You can specify operation to check warning (default is >). Example --critical ">42,<42"',
         type=str,
         default=None
     )
 
     args = parser.parse_args()
 
-    checks = []
-    for c in args.check:
-        data = c.split(',')
-        key = data[0]
-        minimum = data[1] if len(data) >= 2 else None
-        maximum = data[2] if len(data) >= 3 else None
-        ascending = False if len(data) >= 4 and data[3] == 'd' else True
-        checks.append(Check(key, minimum, maximum, ascending))
-
-    commands = (args.command or "").split(',')
-    warnings = (args.warning or "").split(',')
-    criticals = (args.critical or "").split(',')
-    for comm, w, c in itertools.izip_longest(commands, warnings, criticals):
-        checks.append(Check(comm, w, c))
-        
-
-    r = Redis(args.host, args.port, args.password)
-    if args.action == 'list':
-        r.list_checks()
+    if ('all' in args.command):
+        args.command = all_command_choices
     else:
-        r.check(checks)
-        sys.exit(NagiosReporter().process(checks))
+        args.command = args.command.split(',')
 
+    result = Redis(args).perform_check()
 
 if __name__ == "__main__":
     main()

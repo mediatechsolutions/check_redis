@@ -89,7 +89,7 @@ class Redis(object):
             command_state_nagios = nagios_output_state[command_state]
             if ( command_state_nagios > nagios_output_state[output_state]):
                 output_state = command_data['check_state']
-            if command_state_nagios != 0:
+            if not self.enable_performance_data or command_state_nagios != 0:
                 output += '%s: %s  %s\n' % (command, command_data['value'], command_state)
             output_perf_data += command_data['perf_data'] + ' '
         

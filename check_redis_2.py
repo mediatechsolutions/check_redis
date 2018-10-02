@@ -203,7 +203,7 @@ def parse_args():
         '-c', '--check-config',
         nargs='+',
         default=[],
-        help='Check configuration, with format: key,warning,critical,([a]|d),min,max',
+        help='Check configuration, with format: key,warning,critical,min,max,([a]|d)',
     )
 
     return parser.parse_args()
@@ -240,8 +240,8 @@ def main():
         check = checks[key]
         check.warning_limit = float(data[1]) if len(data) >= 2 else None
         check.error_limit = float(data[2]) if len(data) >= 3 else None
-        check.minimum = float(data[2]) if len(data) >= 3 else None
-        check.maximum = float(data[3]) if len(data) >= 4 else None
+        check.minimum = float(data[3]) if len(data) >= 4 else None
+        check.maximum = float(data[4]) if len(data) >= 5 else None
         check.ascending = False if len(data) >= 6 and data[5] == 'd' else True
         
     r.check(checks)

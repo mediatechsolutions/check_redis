@@ -14,15 +14,18 @@ nagios_output_state = {
 }
 
 class Check(object):
-    def __init__(self, key, warning_limit, error_limit, ascending=True):
+    def __init__(self, key, forced=False):
         self.key = key
         self.value = None
-        self.warning_limit = float(warning_limit) if warning_limit else None
-        self.error_limit = float(error_limit) if error_limit else None
-        self.ascending = ascending
+        self.warning_limit = None
+        self.error_limit = None
+        self.ascending = True
+        self.minimum = None 
+        self.maximum = None
+        self.forced = forced
 
     def __str__(self):
-        return "CHECK %s, %s, %s, %s" % (self.value, self.minimum, self.maximum, self.ascending)
+        return "CHECK %s=%s, %s, %s, %s" % (self.key, self.value, self.warning_limit, self.error_limit, self.ascending)
 
     def __repr__(self):
         return str(self)
@@ -60,7 +63,11 @@ class NagiosReporter(object):
         status =  -1
         feedback = ''
         performance = []
-        for check in check_list:
+        for key in sorted(check_list.keys()):
+            check = check_list[key]
+            if isinstance(check.value, str) and not check.forced:
+                # avoid string outputs unless forced
+                continue
             op = '>' if check.ascending else '<'
             if status < self.ERROR and check.is_error():
                 status = self.ERROR
@@ -74,16 +81,19 @@ class NagiosReporter(object):
                 status = self.OK
 
             performance.append(
-                "{label}={value};{warn};{crit};;".format(
+                "{label}={value};{warn};{crit};{m};{M}".format(
                     label=check.key,
                     value='U' if check.value is None else check.value,
                     warn='' if check.warning_limit is None else check.warning_limit,
                     crit='' if check.error_limit is None else check.error_limit,
+                    m='' if check.minimum is None else check.minimum,
+                    M='' if check.maximum is None else check.maximum,
                 )
             )
 
         print("{feedback}\n|{perf}".format(feedback=feedback, perf='\n'.join(performance)))
-            
+        if status == -1:
+            status = self.UNKNOWN
         return status % len(self.STATUS)
 
 
@@ -142,23 +152,25 @@ class Redis(object):
 
     def check(self, check_list):
         self.check_list = check_list
-        for check in check_list:
+        for check in check_list.values():
             value = self.get_value(check.key)
+            if value is None:
+                continue
             try:
                 check.value = int(value)
-            except TypeError:
+            except ValueError:
                 try:
                     check.value = float(value)
-                except TypeError:
+                except ValueError:
                     check.value = value 
 
     def list_checks(self):
         keys = self.info.keys()
         keys.append("hit_ratio")
-        for x in sorted(self.info.keys()):
-            print(x)
+        return keys
 
-def main():
+
+def parse_args():
     parser = argparse.ArgumentParser(
         description='Return result of a check to redis with nagios format')
 
@@ -176,10 +188,22 @@ def main():
     parser.add_argument('action', choices="check list".split(), default='check', nargs='?')
 
     parser.add_argument(
-        '-k', '--check',
+        '-i', '--include',
         nargs='+',
         default=[],
         help='list of checks to perform.',
+    )
+    parser.add_argument(
+        '-e', '--exclude',
+        nargs='+',
+        default=[],
+        help='list of checks to perform.',
+    )
+    parser.add_argument(
+        '-c', '--check-config',
+        nargs='+',
+        default=[],
+        help='Check configuration, with format: key,warning,critical,([a]|d),min,max',
     )
 
     parser.add_argument(
@@ -194,43 +218,47 @@ def main():
         help='Deprecated. Use --check instead',
         type=str,
     )
-    parser.add_argument(
-        '-w', '--warning',
-        help='Deprecated. Use --check instead',
-        type=str,
-        default=None
-    )
-    parser.add_argument(
-        '-c', '--critical',
-        help='Deprecated. Use --check instead',
-        type=str,
-        default=None
-    )
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    checks = []
-    for c in args.check:
-        data = c.split(',')
-        key = data[0]
-        minimum = data[1] if len(data) >= 2 else None
-        maximum = data[2] if len(data) >= 3 else None
-        ascending = False if len(data) >= 4 and data[3] == 'd' else True
-        checks.append(Check(key, minimum, maximum, ascending))
 
-    commands = (args.command or "").split(',')
-    warnings = (args.warning or "").split(',')
-    criticals = (args.critical or "").split(',')
-    for comm, w, c in itertools.izip_longest(commands, warnings, criticals):
-        checks.append(Check(comm, w, c))
-        
+def main():
+    args = parse_args()
 
     r = Redis(args.host, args.port, args.password)
     if args.action == 'list':
-        r.list_checks()
+        for x in sorted(r.list_checks()):
+            print(x)
+        return
+
+    checks = {}
+
+    if args.include:
+        for key in args.include:
+            checks[key] = Check(key, forced=True)
     else:
-        r.check(checks)
-        sys.exit(NagiosReporter().process(checks))
+        for key in r.list_checks():
+            checks[key] = Check(key)
+        
+    for key in args.exclude:
+        if key in checks:
+            checks.pop(key)
+
+    for c in args.check_config:
+        data = c.split(',')
+        key = data[0]
+        if key not in checks:
+            continue
+        check = checks[key]
+        check.warning_limit = float(data[1]) if len(data) >= 2 else None
+        check.error_limit = float(data[2]) if len(data) >= 3 else None
+        check.minimum = float(data[2]) if len(data) >= 3 else None
+        check.maximum = float(data[3]) if len(data) >= 4 else None
+        check.ascending = False if len(data) >= 6 and data[5] == 'd' else True
+        
+    r.check(checks)
+    rc = NagiosReporter().process(checks)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

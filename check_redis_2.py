@@ -91,7 +91,7 @@ class NagiosReporter(object):
                 )
             )
 
-        print("{feedback}\n|{perf}".format(feedback=feedback, perf='\n'.join(performance)))
+        print("{feedback}\n|{perf}".format(feedback=feedback, perf=' '.join(performance)))
         if status == -1:
             status = self.UNKNOWN
         return status % len(self.STATUS)
@@ -204,19 +204,6 @@ def parse_args():
         nargs='+',
         default=[],
         help='Check configuration, with format: key,warning,critical,([a]|d),min,max',
-    )
-
-    parser.add_argument(
-        '--enable-performance-data',
-        help='Deprecated. It is always shown',
-        action='store_true',
-        default=False
-    )
-
-    parser.add_argument(
-        '--command',
-        help='Deprecated. Use --check instead',
-        type=str,
     )
 
     return parser.parse_args()

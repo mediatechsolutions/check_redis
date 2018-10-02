@@ -233,13 +233,14 @@ def main():
 
     checks = {}
 
-    if args.include:
-        for key in args.include:
+    inclusions = [x for x in args.include if x]
+    if inclusions:
+        for key in inclusions:
             checks[key] = Check(key, forced=True)
     else:
         for key in r.list_checks():
             checks[key] = Check(key)
-        
+
     for key in args.exclude:
         if key in checks:
             checks.pop(key)
